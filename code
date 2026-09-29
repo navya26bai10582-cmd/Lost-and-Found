@@ -1,0 +1,183 @@
+# ============================================================
+# item_module.py - item management (Report, View, Claim, Update, Close)
+# ============================================================
+from datetime import datetime  # used to stamp the report date
+
+from database import load_items, save_items, append_row
+from input_utils import get_text, get_float, press_enter
+from student_module import is_registered
+from history_module import add_history   # FIX: the original imported the misspelled 'add_hitory'
+from config import (ITEM_TYPES, STATUS_OPEN, STATUS_CLAIMED, STATUS_CLOSED, FINAL_STATUSES)
+
+
+def generate_item_id():
+    """Return the next free ID: ITM001, ITM002, ..."""
+    df = load_items()                                   # read all items
+    numbers = []                                        # will hold the numeric part of each ID
+    for item_id in df["item_id"]:                       # look at every existing ID
+        try:
+            numbers.append(int(str(item_id).replace("ITM", "")))  # "ITM007" -> 7
+        except ValueError:                              # malformed ID such as "ITMabc"
+            pass                                        # ignore it
+    next_number = max(numbers) + 1 if numbers else 1    # one more than the biggest, or 1 if none
+    return "ITM" + str(next_number).zfill(3)            # pad with zeros -> ITM008
+
+
+def find_item(df, item_id):
+    """Return the row index of item_id (case-insensitive), or None if missing."""
+    matching = df[df["item_id"].astype(str).str.upper() == item_id.strip().upper()]  # rows that match
+    return None if matching.empty else matching.index[0]  # first match or None
+
+
+def _show(title, df, width, empty_message):
+    """Shared helper that prints a titled table (or a message when empty)."""
+    print("\n" + "=" * width)
+    print(title.center(width))
+    print("=" * width)
+    print(empty_message if df.empty else df.to_string(index=False))
+    press_enter()
+
+
+def report_item():
+    """Create a new Lost/Found report."""
+    df = load_items()                                   # read current items
+    print("\n" + "=" * 60)
+    print("REPORT LOST / FOUND ITEM".center(60))
+    print("=" * 60)
+    item_name = get_text("Enter Item Name: ")           # what was lost/found
+    while True:                                         # repeat until type is valid
+        item_type = input("Enter Item Type (Lost/Found): ").strip().capitalize()  # "lost" -> "Lost"
+        if item_type in ITEM_TYPES:                     # valid type
+            break
+        print("Please enter either Lost or Found.")
+    description = get_text("Enter Description: ")       # colour, brand, marks...
+    location = get_text("Enter Location: ")             # where it was lost/found
+    reported_by = get_text("Enter Student ID of Reporter: ").upper()  # who is reporting
+    if not is_registered(reported_by):                  # only registered students may report
+        print("\nStudent is not registered.")
+        print("Please register the student first.")
+        press_enter()
+        return                                          # stop: nothing is saved
+    estimated_value = get_float("Enter Estimated Value (Rs): ", 0)  # number >= 0
+    item_id = generate_item_id()                        # new unique ID
+    row = {                                             # the new record
+        "item_id": item_id,
+        "item_name": item_name,
+        "item_type": item_type,
+        "description": description,
+        "location": location,
+        "date_reported": datetime.now().strftime("%Y-%m-%d"),
+        "reported_by": reported_by,
+        "estimated_value": estimated_value,
+        "status": STATUS_OPEN,
+    }
+    save_items(append_row(df, row))                     # add the row and save
+    add_history(item_id, reported_by, "Item Reported")  # write to the audit trail
+    print("\nItem reported successfully!")
+    print("Generated Item ID:", item_id)
+    press_enter()
+
+
+def view_all_items():
+    """Show every report regardless of status."""
+    _show("ALL LOST & FOUND ITEMS", load_items(), 120, "No items found.")
+
+
+def _view_open(item_type, title):
+    """Show only the OPEN reports of one type."""
+    df = load_items()                                   # read items
+    result = df[(df["item_type"] == item_type) & (df["status"] == STATUS_OPEN)]  # filter rows
+    _show(title, result, 100, f"No active {item_type.lower()} item reports.")
+
+
+def view_lost_items():
+    """Show open Lost reports."""
+    _view_open("Lost", "LOST ITEMS")
+
+
+def view_found_items():
+    """Show open Found reports."""
+    _view_open("Found", "FOUND ITEMS")
+
+
+def claim_item():
+    """Mark an open item as Claimed by a registered student."""
+    df = load_items()                                   # read items
+    print("\n" + "=" * 60)
+    print("CLAIM ITEM".center(60))
+    print("=" * 60)
+    if df.empty:                                        # nothing to claim
+        print("No items available.")
+        press_enter()
+        return
+    index = find_item(df, get_text("Enter Item ID: "))  # locate the item
+    if index is None:                                   # unknown ID
+        print("\nItem ID not found.")
+        press_enter()
+        return
+    status = df.loc[index, "status"]                    # current status
+    if status in FINAL_STATUSES:                        # FIX: Closed items used to be claimable
+        print(f"\nThis item is already {status.lower()} and cannot be claimed.")
+        press_enter()
+        return
+    student_id = get_text("Enter Student ID of person claiming item: ").upper()  # claimant
+    if not is_registered(student_id):                   # claimant must be registered
+        print("\nStudent is not registered.")
+        press_enter()
+        return
+    df.loc[index, "status"] = STATUS_CLAIMED            # change the status
+    save_items(df)                                      # persist the change
+    add_history(df.loc[index, "item_id"], student_id, "Item Claimed")  # audit trail
+    print("\nItem successfully marked as CLAIMED.")
+    press_enter()
+
+
+def update_item():
+    """Change the description and location of an open item."""
+    df = load_items()                                   # read items
+    print("\n" + "=" * 60)
+    print("UPDATE ITEM".center(60))
+    print("=" * 60)
+    index = find_item(df, get_text("Enter Item ID: "))  # locate the item
+    if index is None:
+        print("\nItem not found.")
+        press_enter()
+        return
+    status = df.loc[index, "status"]                    # current status
+    if status in FINAL_STATUSES:                        # FIX: finished reports must stay unchanged
+        print(f"\nA {status.lower()} item cannot be updated.")
+        press_enter()
+        return
+    print("\nCurrent Details:")
+    print(df.loc[index].to_string())                    # show the record
+    print("\nEnter new details.")
+    df.loc[index, "description"] = get_text("New Description: ")  # overwrite description
+    df.loc[index, "location"] = get_text("New Location: ")        # overwrite location
+    save_items(df)                                      # persist
+    add_history(df.loc[index, "item_id"], df.loc[index, "reported_by"], "Item Updated")
+    print("\nItem details updated successfully.")
+    press_enter()
+
+
+def close_report():
+    """Close an open report without a claim (e.g. withdrawn)."""
+    df = load_items()                                   # read items
+    print("\n" + "=" * 60)
+    print("CLOSE REPORT".center(60))
+    print("=" * 60)
+    index = find_item(df, get_text("Enter Item ID: "))  # locate the item
+    if index is None:
+        print("\nItem not found.")
+        press_enter()
+        return
+    status = df.loc[index, "status"]                    # current status
+    if status in FINAL_STATUSES:                        # FIX: a Claimed item was overwritten to Closed
+        print(f"\nThis report is already {status.lower()}.")
+        press_enter()
+        return
+    df.loc[index, "status"] = STATUS_CLOSED             # change the status
+    save_items(df)                                      # persist
+    add_history(df.loc[index, "item_id"], df.loc[index, "reported_by"], "Report Closed")
+    print("\nReport closed successfully.")
+    press_enter()
+    
